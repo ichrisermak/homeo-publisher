@@ -209,14 +209,26 @@ async function publishMax(text, media) {
   const first = text.slice(0, 4000);
   const body = { text: first, ...(attachments.length && { attachments }) };
 
+  // Диагностика: какой чат видит бот под этим ID
+  try {
+    const me = await maxCall("/me");
+    console.log(`[Max] бот: ${me.name || me.first_name} (@${me.username || "—"})`);
+    const chat = await maxCall(`/chats/${MAX_CHANNEL_ID}`);
+    console.log(`[Max] чат ${MAX_CHANNEL_ID}: "${chat.title}", тип ${chat.type}, статус ${chat.status}`);
+  } catch (e) {
+    console.log(`[Max] диагностика: ${shortErr(e)}`);
+  }
+
   // Картинка может обрабатываться пару секунд — повторяем при attachment.not.ready
   for (let attempt = 1; ; attempt++) {
     try {
-      await maxCall(`/messages?chat_id=${MAX_CHANNEL_ID}`, {
+      const sent = await maxCall(`/messages?chat_id=${MAX_CHANNEL_ID}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      const m = sent.message || sent;
+      console.log(`[Max] ответ: получатель ${JSON.stringify(m.recipient || {})}, id ${m.body ? m.body.mid : "—"}`);
       break;
     } catch (e) {
       if (/not\.ready/i.test(e.message) && attempt < 5) { await sleep(2000 * attempt); continue; }
