@@ -23,6 +23,14 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      # Сертификат Минцифры — нужен для API Max (platform-api2.max.ru)
+      - name: Russian Trusted Root CA
+        continue-on-error: true
+        run: |
+          curl -fsSL --max-time 20 https://gu-st.ru/content/Other/doc/russian_trusted_root_ca.cer -o ru_ca.cer
+          openssl x509 -in ru_ca.cer -out ru_ca.pem 2>/dev/null || openssl x509 -inform DER -in ru_ca.cer -out ru_ca.pem
+          echo "NODE_EXTRA_CA_CERTS=$PWD/ru_ca.pem" >> "$GITHUB_ENV"
+
       - name: Run publisher
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
