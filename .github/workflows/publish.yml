@@ -2,14 +2,35 @@ name: Auto Publisher
 
 on:
   schedule:
-    # Каждые 5 минут — GitHub Actions минимальный интервал
+    # Каждые 5 минут — минимальный интервал GitHub Actions
     - cron: "*/5 * * * *"
   workflow_dispatch: # ручной запуск для теста
+
+# Не запускать два прогона одновременно (иначе возможны дубли)
+concurrency:
+  group: publisher
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
+
+    env:
+      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+      SHEET_NAME: ${{ secrets.SHEET_NAME }}
+      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+      TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+      TG_MIRROR_BOT_TOKEN: ${{ secrets.TG_MIRROR_BOT_TOKEN }}
+      VK_TOKEN: ${{ secrets.VK_TOKEN }}
+      VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
+      MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
+      MAX_CHANNEL_ID: ${{ secrets.MAX_CHANNEL_ID }}
+      THREADS_TOKEN_ANNA: ${{ secrets.THREADS_TOKEN_ANNA }}
+      THREADS_USER_ID_ANNA: ${{ secrets.THREADS_USER_ID_ANNA }}
+      THREADS_TOKEN_PROSTO: ${{ secrets.THREADS_TOKEN_PROSTO }}
+      THREADS_USER_ID_PROSTO: ${{ secrets.THREADS_USER_ID_PROSTO }}
 
     steps:
       - name: Checkout
@@ -31,19 +52,11 @@ jobs:
           openssl x509 -in ru_ca.cer -out ru_ca.pem 2>/dev/null || openssl x509 -inform DER -in ru_ca.cer -out ru_ca.pem
           echo "NODE_EXTRA_CA_CERTS=$PWD/ru_ca.pem" >> "$GITHUB_ENV"
 
+      # Посты из Telegram → Max
+      - name: Mirror TG to Max
+        continue-on-error: true
+        run: node mirror.js
+
+      # Публикации по таблице
       - name: Run publisher
-        env:
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          SHEET_NAME: ${{ secrets.SHEET_NAME }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
-          VK_TOKEN: ${{ secrets.VK_TOKEN }}
-          VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
-          MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
-          MAX_CHANNEL_ID: ${{ secrets.MAX_CHANNEL_ID }}
-          THREADS_TOKEN_ANNA: ${{ secrets.THREADS_TOKEN_ANNA }}
-          THREADS_USER_ID_ANNA: ${{ secrets.THREADS_USER_ID_ANNA }}
-          THREADS_TOKEN_PROSTO: ${{ secrets.THREADS_TOKEN_PROSTO }}
-          THREADS_USER_ID_PROSTO: ${{ secrets.THREADS_USER_ID_PROSTO }}
         run: node publisher.js
