@@ -257,6 +257,9 @@ async function main() {
   const rows = data.values || [];
   const now = new Date();
   console.log(`[${now.toISOString()}] Лист "${SHEET_NAME}": ${rows.length} строк`);
+  // Куда публикуем (без раскрытия токенов) — для проверки настроек
+  const mask = (v) => (v ? `${v.slice(0, 5)}…${v.slice(-3)}` : "не задан");
+  console.log(`TG канал: ${mask(TG_CHANNEL_ID)} | Max канал: ${mask(MAX_CHANNEL_ID)} | VK: ${mask(VK_OWNER_ID)}`);
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
