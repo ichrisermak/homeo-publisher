@@ -157,11 +157,32 @@ async function publishVK(text, media) {
 
 // ─── Max ─────────────────────────────────────────────────────────────────────
 
+// Новый адрес API использует сертификат Минцифры, которому серверы GitHub не доверяют.
+// Поэтому при сетевой ошибке пробуем запасной адрес.
+const MAX_API_FALLBACK = "https://platform-api.max.ru";
+let maxBase = MAX_API;
+
+async function maxFetch(path, options) {
+  const opts = { ...options, headers: { Authorization: MAX_TOKEN, ...(options.headers || {}) } };
+  try {
+    return await fetch(`${maxBase}${path}`, opts);
+  } catch (e) {
+    const cause = e.cause ? `${e.cause.code || ""} ${e.cause.message || ""}`.trim() : "";
+    if (maxBase !== MAX_API_FALLBACK) {
+      console.log(`[Max] ${maxBase} недоступен (${cause}), пробую ${MAX_API_FALLBACK}`);
+      maxBase = MAX_API_FALLBACK;
+      try { return await fetch(`${maxBase}${path}`, opts); }
+      catch (e2) {
+        const c2 = e2.cause ? `${e2.cause.code || ""} ${e2.cause.message || ""}`.trim() : "";
+        throw new Error(`сеть: ${cause} / ${c2}`);
+      }
+    }
+    throw new Error(`сеть: ${cause}`);
+  }
+}
+
 async function maxCall(path, options = {}) {
-  const res = await fetch(`${MAX_API}${path}`, {
-    ...options,
-    headers: { Authorization: MAX_TOKEN, ...(options.headers || {}) },
-  });
+  const res = await maxFetch(path, options);
   const raw = await res.text();
   let data;
   try { data = JSON.parse(raw); } catch { data = { raw }; }
