@@ -29,6 +29,8 @@ const VK_OWNER_ID = env("VK_OWNER_ID"); // ID сообщества со знак
 
 const MAX_CHANNEL_ID = env("MAX_CHANNEL_ID");
 const { publishMax } = require("./max");
+const { loadTokens, saveToken, ageDays } = require("./tokens");
+let TOKENS = {};
 
 // Если работает зеркало TG → Max, посты с TG = да попадут в Max через зеркало.
 // Чтобы не было дублей, таблица в этом случае в Max их не отправляет.
@@ -69,6 +71,16 @@ function toDirectUrl(url) {
     url.match(/drive\.google\.com\/open\?id=([^&#]+)/) ||
     url.match(/drive\.google\.com\/uc\?.*id=([^&#]+)/);
   return m ? `https://drive.google.com/uc?export=download&id=${m[1]}` : url;
+}
+
+/** Публичная ссылка на картинку для Meta (Threads/Instagram забирают файл сами) */
+function toPublicImageUrl(url) {
+  if (!url) return null;
+  const m =
+    url.match(/drive\.google\.com\/file\/d\/([^/?#]+)/) ||
+    url.match(/drive\.google\.com\/open\?id=([^&#]+)/) ||
+    url.match(/drive\.google\.com\/uc\?.*id=([^&#]+)/);
+  return m ? `https://lh3.googleusercontent.com/d/${m[1]}=w1440` : url;
 }
 
 /** Скачивает картинку один раз, чтобы отправить её на все площадки */
@@ -159,32 +171,71 @@ async function publishVK(text, media) {
 }
 
 // ─── Threads ─────────────────────────────────────────────────────────────────
+// Токены лежат на скрытом листе «Служебное» (подключение — workflow «Connect Threads»).
+// Токен живёт 60 дней; раз в несколько дней продлеваем его автоматически.
+
+const TH_API = "https://graph.threads.net";
+
+async function refreshThreadsTokens(sheets) {
+  for (const key of ["anna", "prosto"]) {
+    const t = TOKENS[`threads_${key}`];
+    if (!t || !t.token || ageDays(t.updated) < 3) continue;
+    try {
+      const r = await (await fetch(
+        `${TH_API}/refresh_access_token?grant_type=th_refresh_token&access_token=${encodeURIComponent(t.token)}`
+      )).json();
+      if (!r.access_token) throw new Error(JSON.stringify(r.error || r).slice(0, 150));
+      await saveToken(sheets, SPREADSHEET_ID, `threads_${key}`, { token: r.access_token, userId: t.userId, note: t.note });
+      t.token = r.access_token;
+      console.log(`[Threads] токен ${key} продлён`);
+    } catch (e) {
+      console.log(`[Threads] ⚠️ не удалось продлить токен ${key}: ${shortErr(e)}`);
+    }
+  }
+}
 
 async function publishThreads(text, mediaUrl, target) {
   const keys = target === "оба" || target === "both" ? ["anna", "prosto"] : [target];
-  const accounts = keys.map((k) => THREADS[k]).filter(Boolean);
-  if (!accounts.length) throw new Error(`неизвестный аккаунт "${target}" (anna / prosto / оба)`);
+  if (!keys.every((k) => THREADS[k])) throw new Error(`неизвестный аккаунт "${target}" (anna / prosto / оба)`);
 
-  for (const acc of accounts) {
-    if (!acc.token || !acc.userId) throw new Error(`${acc.name}: нет токена`);
-    const params = new URLSearchParams({
-      media_type: mediaUrl ? "IMAGE" : "TEXT",
-      text: text.slice(0, 500), // лимит Threads — 500 символов
-      access_token: acc.token,
-      ...(mediaUrl && { image_url: mediaUrl }),
-    });
-    const c = await (await fetch(`https://graph.threads.net/v1.0/${acc.userId}/threads`, { method: "POST", body: params })).json();
-    if (!c.id) throw new Error(`${acc.name}: ${c.error ? c.error.message : "нет id контейнера"}`);
+  const errors = [];
+  for (const k of keys) {
+    const acc = THREADS[k];
+    const t = TOKENS[`threads_${k}`] || {};
+    const token = t.token || acc.token;
+    const userId = t.userId || acc.userId;
+    try {
+      if (!token || !userId) throw new Error("аккаунт не подключён");
+      const c = await (await fetch(`${TH_API}/v1.0/${userId}/threads`, {
+        method: "POST",
+        body: new URLSearchParams({
+          media_type: mediaUrl ? "IMAGE" : "TEXT",
+          text: text.slice(0, 500), // лимит Threads — 500 символов
+          access_token: token,
+          ...(mediaUrl && { image_url: mediaUrl }),
+        }),
+      })).json();
+      if (!c.id) throw new Error(c.error ? c.error.message : "нет id контейнера");
 
-    await sleep(30000); // Meta рекомендует подождать перед публикацией
+      // Ждём, пока Meta обработает пост (обычно 5–30 сек)
+      for (let i = 0; i < 12; i++) {
+        await sleep(5000);
+        const st = await (await fetch(`${TH_API}/v1.0/${c.id}?fields=status,error_message&access_token=${encodeURIComponent(token)}`)).json();
+        if (st.status === "FINISHED") break;
+        if (st.status === "ERROR" || st.status === "EXPIRED") throw new Error(st.error_message || st.status);
+      }
 
-    const p = await (await fetch(`https://graph.threads.net/v1.0/${acc.userId}/threads_publish`, {
-      method: "POST",
-      body: new URLSearchParams({ creation_id: c.id, access_token: acc.token }),
-    })).json();
-    if (!p.id) throw new Error(`${acc.name}: ${p.error ? p.error.message : "публикация не удалась"}`);
-    console.log(`[Threads] ${acc.name}: ${p.id}`);
+      const p = await (await fetch(`${TH_API}/v1.0/${userId}/threads_publish`, {
+        method: "POST",
+        body: new URLSearchParams({ creation_id: c.id, access_token: token }),
+      })).json();
+      if (!p.id) throw new Error(p.error ? p.error.message : "публикация не удалась");
+      console.log(`[Threads] ${acc.name}: ${p.id}`);
+    } catch (e) {
+      errors.push(`${acc.name}: ${shortErr(e)}`);
+    }
   }
+  if (errors.length) throw new Error(errors.join("; "));
 }
 
 // ─── Основная логика ─────────────────────────────────────────────────────────
@@ -202,10 +253,14 @@ async function main() {
   });
   const rows = data.values || [];
   const now = new Date();
+
+  TOKENS = await loadTokens(sheets, SPREADSHEET_ID);
+  await refreshThreadsTokens(sheets);
   console.log(`[${now.toISOString()}] Лист "${SHEET_NAME}": ${rows.length} строк`);
   // Куда публикуем (без раскрытия токенов) — для проверки настроек
   const mask = (v) => (v ? `${v.slice(0, 5)}…${v.slice(-3)}` : "не задан");
   console.log(`TG канал: ${mask(TG_CHANNEL_ID)} | Max канал: ${mask(MAX_CHANNEL_ID)} | VK: ${mask(VK_OWNER_ID)}`);
+  console.log(`Threads: anna ${TOKENS.threads_anna ? TOKENS.threads_anna.note || "подключён" : "не подключён"}, prosto ${TOKENS.threads_prosto ? TOKENS.threads_prosto.note || "подключён" : "не подключён"}`);
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -247,7 +302,7 @@ async function main() {
       if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
       else await run("Max", () => publishMax(text, media ? [media] : []));
     }
-    if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, mediaUrl, threadsTarget));
+    if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, toPublicImageUrl(cell(COL.MEDIA)), threadsTarget));
 
     let status;
     if (!errors.length) status = "✅";
