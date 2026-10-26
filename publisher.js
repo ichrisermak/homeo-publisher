@@ -74,14 +74,18 @@ function toDirectUrl(url) {
 }
 
 /** Публичная ссылка на картинку для Meta (Threads/Instagram забирают файл сами) */
-function toPublicImageUrl(url) {
+function toPublicImageUrl(url, jpeg = false) {
   if (!url) return null;
   const m =
     url.match(/drive\.google\.com\/file\/d\/([^/?#]+)/) ||
     url.match(/drive\.google\.com\/open\?id=([^&#]+)/) ||
     url.match(/drive\.google\.com\/uc\?.*id=([^&#]+)/);
-  return m ? `https://lh3.googleusercontent.com/d/${m[1]}=w1440` : url;
+  // =w1440 — ширина до 1440px (требование Meta), -rj — отдать как JPEG (Instagram принимает только JPEG)
+  return m ? `https://lh3.googleusercontent.com/d/${m[1]}=w1440${jpeg ? "-rj" : ""}` : url;
 }
+
+/** Ячейка «Медиа» может содержать несколько ссылок — каждая с новой строки (до 10) */
+const splitLinks = (v) => String(v || "").split(/[\s,]+/).map((x) => x.trim()).filter((x) => /^https?:\/\//.test(x)).slice(0, 10);
 
 /** Скачивает картинку один раз, чтобы отправить её на все площадки */
 async function downloadMedia(url) {
@@ -111,7 +115,7 @@ async function tgCall(method, body) {
   return data.result;
 }
 
-async function publishTelegram(text, media) {
+async function publishTelegram(text, medias) {
   if (!TG_BOT_TOKEN || !TG_CHANNEL_ID) throw new Error("нет TG_BOT_TOKEN / TG_CHANNEL_ID");
 
   const sendText = async (t) => {
@@ -126,15 +130,23 @@ async function publishTelegram(text, media) {
     }
   };
 
-  if (!media) return sendText(text);
+  if (!medias.length) return sendText(text);
 
   // Подпись к фото — максимум 1024 символа. Длинный текст отправляем вторым сообщением.
   const fits = text.length <= 1024;
   const form = new FormData();
   form.append("chat_id", TG_CHANNEL_ID);
-  form.append("photo", new Blob([media.buf], { type: media.type }), media.filename);
-  if (fits) form.append("caption", text);
-  await tgCall("sendPhoto", form);
+  if (medias.length === 1) {
+    form.append("photo", new Blob([medias[0].buf], { type: medias[0].type }), medias[0].filename);
+    if (fits) form.append("caption", text);
+    await tgCall("sendPhoto", form);
+  } else {
+    // Альбом: до 10 фото, подпись у первого
+    const group = medias.map((m, i) => ({ type: "photo", media: `attach://f${i}`, ...(i === 0 && fits && { caption: text }) }));
+    medias.forEach((m, i) => form.append(`f${i}`, new Blob([m.buf], { type: m.type }), m.filename));
+    form.append("media", JSON.stringify(group));
+    await tgCall("sendMediaGroup", form);
+  }
   if (!fits) await sendText(text);
 }
 
@@ -148,12 +160,11 @@ async function vkCall(method, params) {
   return data.response;
 }
 
-async function publishVK(text, media) {
+async function publishVK(text, medias) {
   if (!VK_TOKEN || !VK_OWNER_ID) throw new Error("нет VK_TOKEN / VK_OWNER_ID");
   const groupId = String(VK_OWNER_ID).replace("-", "");
-  let attachments = "";
-
-  if (media) {
+  const att = [];
+  for (const media of medias) {
     const server = await vkCall("photos.getWallUploadServer", { group_id: groupId });
     const form = new FormData();
     form.append("photo", new Blob([media.buf], { type: media.type }), media.filename);
@@ -162,8 +173,9 @@ async function publishVK(text, media) {
     const saved = await vkCall("photos.saveWallPhoto", {
       group_id: groupId, photo: up.photo, server: up.server, hash: up.hash,
     });
-    attachments = `photo${saved[0].owner_id}_${saved[0].id}`;
+    att.push(`photo${saved[0].owner_id}_${saved[0].id}`);
   }
+  const attachments = att.join(",");
 
   await vkCall("wall.post", {
     owner_id: `-${groupId}`, from_group: 1, message: text, ...(attachments && { attachments }),
@@ -238,6 +250,83 @@ async function publishThreads(text, mediaUrl, target) {
   if (errors.length) throw new Error(errors.join("; "));
 }
 
+// ─── Instagram ───────────────────────────────────────────────────────────────
+// Подключение — workflow «Connect account» (platform: instagram). Токены на листе «Служебное».
+// Публикует фото (1) или карусель (2–10). Instagram забирает картинки сам по публичной ссылке.
+
+const IG_API = "https://graph.instagram.com";
+const IG_ACCOUNTS = { anna: "@doc.startseva.anna", prosto: "@homeopathy_prosto" };
+
+async function igCall(path, params, token, method = "POST") {
+  const q = new URLSearchParams({ ...params, access_token: token });
+  const res = method === "GET"
+    ? await fetch(`${IG_API}${path}?${q}`)
+    : await fetch(`${IG_API}${path}`, { method: "POST", body: q });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.error_user_msg || data.error.message);
+  return data;
+}
+
+async function igWaitReady(id, token) {
+  for (let i = 0; i < 20; i++) {
+    const st = await igCall(`/${id}`, { fields: "status_code,status" }, token, "GET");
+    if (st.status_code === "FINISHED") return;
+    if (st.status_code === "ERROR" || st.status_code === "EXPIRED") throw new Error(`обработка: ${st.status || st.status_code}`);
+    await sleep(3000);
+  }
+  throw new Error("Instagram слишком долго обрабатывает медиа");
+}
+
+async function refreshIgTokens(sheets) {
+  for (const key of Object.keys(IG_ACCOUNTS)) {
+    const t = TOKENS[`ig_${key}`];
+    if (!t || !t.token || ageDays(t.updated) < 3) continue;
+    try {
+      const r = await (await fetch(`${IG_API}/refresh_access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(t.token)}`)).json();
+      if (!r.access_token) throw new Error(JSON.stringify(r.error || r).slice(0, 150));
+      await saveToken(sheets, SPREADSHEET_ID, `ig_${key}`, { token: r.access_token, userId: t.userId, note: t.note });
+      t.token = r.access_token;
+      console.log(`[Instagram] токен ${key} продлён`);
+    } catch (e) {
+      console.log(`[Instagram] ⚠️ не удалось продлить токен ${key}: ${shortErr(e)}`);
+    }
+  }
+}
+
+async function publishInstagram(caption, links, target) {
+  const keys = target === "оба" || target === "both" ? ["anna", "prosto"] : [target === "да" ? "prosto" : target];
+  if (!keys.every((k) => IG_ACCOUNTS[k])) throw new Error(`неизвестный аккаунт "${target}" (anna / prosto / оба)`);
+  if (!links.length) throw new Error("для Instagram нужна картинка — добавьте ссылку в «Медиа»");
+  const urls = links.map((l) => toPublicImageUrl(l, true));
+  caption = caption.slice(0, 2200); // лимит подписи Instagram
+
+  const errors = [];
+  for (const k of keys) {
+    const t = TOKENS[`ig_${k}`] || {};
+    try {
+      if (!t.token || !t.userId) throw new Error("аккаунт не подключён");
+      let containerId;
+      if (urls.length === 1) {
+        containerId = (await igCall(`/${t.userId}/media`, { image_url: urls[0], caption }, t.token)).id;
+      } else {
+        const children = [];
+        for (const u of urls) {
+          const ch = await igCall(`/${t.userId}/media`, { image_url: u, is_carousel_item: "true" }, t.token);
+          children.push(ch.id);
+        }
+        for (const ch of children) await igWaitReady(ch, t.token);
+        containerId = (await igCall(`/${t.userId}/media`, { media_type: "CAROUSEL", children: children.join(","), caption }, t.token)).id;
+      }
+      await igWaitReady(containerId, t.token);
+      const p = await igCall(`/${t.userId}/media_publish`, { creation_id: containerId }, t.token);
+      console.log(`[Instagram] ${IG_ACCOUNTS[k]}: ${p.id}`);
+    } catch (e) {
+      errors.push(`${IG_ACCOUNTS[k]}: ${shortErr(e)}`);
+    }
+  }
+  if (errors.length) throw new Error(errors.join("; "));
+}
+
 // ─── Основная логика ─────────────────────────────────────────────────────────
 
 async function main() {
@@ -256,11 +345,13 @@ async function main() {
 
   TOKENS = await loadTokens(sheets, SPREADSHEET_ID);
   await refreshThreadsTokens(sheets);
+  await refreshIgTokens(sheets);
   console.log(`[${now.toISOString()}] Лист "${SHEET_NAME}": ${rows.length} строк`);
   // Куда публикуем (без раскрытия токенов) — для проверки настроек
   const mask = (v) => (v ? `${v.slice(0, 5)}…${v.slice(-3)}` : "не задан");
   console.log(`TG канал: ${mask(TG_CHANNEL_ID)} | Max канал: ${mask(MAX_CHANNEL_ID)} | VK: ${mask(VK_OWNER_ID)}`);
   console.log(`Threads: anna ${TOKENS.threads_anna ? TOKENS.threads_anna.note || "подключён" : "не подключён"}, prosto ${TOKENS.threads_prosto ? TOKENS.threads_prosto.note || "подключён" : "не подключён"}`);
+  console.log(`Instagram: anna ${TOKENS.ig_anna ? TOKENS.ig_anna.note : "не подключён"}, prosto ${TOKENS.ig_prosto ? TOKENS.ig_prosto.note : "не подключён"}`);
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -280,8 +371,9 @@ async function main() {
     await updateStatus(sheets, rowNum, "🔄 публикуется");
 
     const textThreads = cell(COL.TEXT_THREADS) || text;
-    const mediaUrl = toDirectUrl(cell(COL.MEDIA));
+    const links = splitLinks(cell(COL.MEDIA));
     const threadsTarget = cell(COL.THREADS).toLowerCase();
+    const igTarget = cell(COL.INSTA).toLowerCase();
 
     const done = [];
     const errors = [];
@@ -290,19 +382,21 @@ async function main() {
       catch (e) { errors.push(`${name}: ${shortErr(e)}`); console.log(`[${name}] ❌ строка ${rowNum}: ${shortErr(e)}`); }
     };
 
-    let media = null;
-    if (mediaUrl) {
-      try { media = await downloadMedia(mediaUrl); }
-      catch (e) { await updateStatus(sheets, rowNum, `❌ ${shortErr(e)}`); continue; }
-    }
+    // Скачиваем картинки один раз для TG / VK / Max (Threads и Instagram забирают их по ссылке сами)
+    const medias = [];
+    try {
+      for (const l of links) medias.push(await downloadMedia(toDirectUrl(l)));
+    } catch (e) { await updateStatus(sheets, rowNum, `❌ ${shortErr(e)}`); continue; }
 
-    if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, media));
-    if (yes(row[COL.VK])) await run("VK", () => publishVK(text, media));
+    if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, medias));
+    if (yes(row[COL.VK])) await run("VK", () => publishVK(text, medias));
     if (yes(row[COL.MAX])) {
       if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
-      else await run("Max", () => publishMax(text, media ? [media] : []));
+      else await run("Max", () => publishMax(text, medias));
     }
-    if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, toPublicImageUrl(cell(COL.MEDIA)), threadsTarget));
+    // Threads: одна картинка (первая), карусели в Threads — позже
+    if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, toPublicImageUrl(links[0]), threadsTarget));
+    if (igTarget && igTarget !== "нет") await run("Instagram", () => publishInstagram(text, links, igTarget));
 
     let status;
     if (!errors.length) status = "✅";
