@@ -1,0 +1,12 @@
+{
+    "name": "homeo-publisher",
+    "version": "1.0.0",
+    "description": "Autopublisher Homeopathy Prosto",
+    "main": "publisher.js",
+    "scripts": {
+          "start": "node publisher.js"
+    },
+    "dependencies": {
+          "googleapis": "^144.0.0"
+    }
+}
