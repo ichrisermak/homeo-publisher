@@ -1,0 +1,42 @@
+name: Auto Publisher
+
+on:
+  schedule:
+    # Каждые 5 минут — GitHub Actions минимальный интервал
+    - cron: "*/5 * * * *"
+  workflow_dispatch: # ручной запуск для теста
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run publisher
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_NAME: ${{ secrets.SHEET_NAME }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
+          MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
+          MAX_CHANNEL_ID: ${{ secrets.MAX_CHANNEL_ID }}
+          THREADS_TOKEN_ANNA: ${{ secrets.THREADS_TOKEN_ANNA }}
+          THREADS_USER_ID_ANNA: ${{ secrets.THREADS_USER_ID_ANNA }}
+          THREADS_TOKEN_PROSTO: ${{ secrets.THREADS_TOKEN_PROSTO }}
+          THREADS_USER_ID_PROSTO: ${{ secrets.THREADS_USER_ID_PROSTO }}
+        run: node publisher.js
