@@ -27,9 +27,12 @@ const TG_CHANNEL_ID = env("TG_CHANNEL_ID");
 const VK_TOKEN = env("VK_TOKEN"); // ключ пользователя-админа группы (права wall, photos, offline)
 const VK_OWNER_ID = env("VK_OWNER_ID"); // ID сообщества со знаком минус, напр. -123456
 
-const MAX_TOKEN = env("MAX_TOKEN");
 const MAX_CHANNEL_ID = env("MAX_CHANNEL_ID");
-const MAX_API = "https://platform-api2.max.ru";
+const { publishMax } = require("./max");
+
+// Если работает зеркало TG → Max, посты с TG = да попадут в Max через зеркало.
+// Чтобы не было дублей, таблица в этом случае в Max их не отправляет.
+const MIRROR_ON = Boolean(env("TG_MIRROR_BOT_TOKEN"));
 
 const THREADS = {
   anna: { token: env("THREADS_TOKEN_ANNA"), userId: env("THREADS_USER_ID_ANNA"), name: "@doc.startseva.anna" },
@@ -155,96 +158,6 @@ async function publishVK(text, media) {
   });
 }
 
-// ─── Max ─────────────────────────────────────────────────────────────────────
-
-// Новый адрес API использует сертификат Минцифры, которому серверы GitHub не доверяют.
-// Поэтому при сетевой ошибке пробуем запасной адрес.
-const MAX_API_FALLBACK = "https://platform-api.max.ru";
-let maxBase = MAX_API;
-
-async function maxFetch(path, options) {
-  const opts = { ...options, headers: { Authorization: MAX_TOKEN, ...(options.headers || {}) } };
-  try {
-    return await fetch(`${maxBase}${path}`, opts);
-  } catch (e) {
-    const cause = e.cause ? `${e.cause.code || ""} ${e.cause.message || ""}`.trim() : "";
-    if (maxBase !== MAX_API_FALLBACK) {
-      console.log(`[Max] ${maxBase} недоступен (${cause}), пробую ${MAX_API_FALLBACK}`);
-      maxBase = MAX_API_FALLBACK;
-      try { return await fetch(`${maxBase}${path}`, opts); }
-      catch (e2) {
-        const c2 = e2.cause ? `${e2.cause.code || ""} ${e2.cause.message || ""}`.trim() : "";
-        throw new Error(`сеть: ${cause} / ${c2}`);
-      }
-    }
-    throw new Error(`сеть: ${cause}`);
-  }
-}
-
-async function maxCall(path, options = {}) {
-  const res = await maxFetch(path, options);
-  const raw = await res.text();
-  let data;
-  try { data = JSON.parse(raw); } catch { data = { raw }; }
-  if (!res.ok) throw new Error(`${res.status} ${data.message || data.code || raw.slice(0, 120)}`);
-  return data;
-}
-
-async function publishMax(text, media) {
-  if (!MAX_TOKEN || !MAX_CHANNEL_ID) throw new Error("нет MAX_TOKEN / MAX_CHANNEL_ID");
-  const attachments = [];
-
-  if (media) {
-    // 1) получаем адрес для загрузки, 2) загружаем файл, 3) прикладываем полученный токен
-    const { url } = await maxCall("/uploads?type=image", { method: "POST" });
-    const form = new FormData();
-    form.append("data", new Blob([media.buf], { type: media.type }), media.filename);
-    const upRes = await fetch(url, { method: "POST", body: form, headers: { Authorization: MAX_TOKEN } });
-    const payload = await upRes.json();
-    if (!upRes.ok) throw new Error(`загрузка картинки: ${JSON.stringify(payload).slice(0, 120)}`);
-    attachments.push({ type: "image", payload });
-  }
-
-  // Лимит Max — 4000 символов на сообщение
-  const first = text.slice(0, 4000);
-  const body = { text: first, ...(attachments.length && { attachments }) };
-
-  // Диагностика: какой чат видит бот под этим ID
-  try {
-    const me = await maxCall("/me");
-    console.log(`[Max] бот: ${me.name || me.first_name} (@${me.username || "—"})`);
-    const chat = await maxCall(`/chats/${MAX_CHANNEL_ID}`);
-    console.log(`[Max] чат ${MAX_CHANNEL_ID}: "${chat.title}", тип ${chat.type}, статус ${chat.status}`);
-  } catch (e) {
-    console.log(`[Max] диагностика: ${shortErr(e)}`);
-  }
-
-  // Картинка может обрабатываться пару секунд — повторяем при attachment.not.ready
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const sent = await maxCall(`/messages?chat_id=${MAX_CHANNEL_ID}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const m = sent.message || sent;
-      console.log(`[Max] ответ: получатель ${JSON.stringify(m.recipient || {})}, id ${m.body ? m.body.mid : "—"}`);
-      break;
-    } catch (e) {
-      if (/not\.ready/i.test(e.message) && attempt < 5) { await sleep(2000 * attempt); continue; }
-      throw e;
-    }
-  }
-
-  if (text.length > 4000) {
-    await maxCall(`/messages?chat_id=${MAX_CHANNEL_ID}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: text.slice(4000) }),
-    });
-  }
-}
-
 // ─── Threads ─────────────────────────────────────────────────────────────────
 
 async function publishThreads(text, mediaUrl, target) {
@@ -330,7 +243,10 @@ async function main() {
 
     if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, media));
     if (yes(row[COL.VK])) await run("VK", () => publishVK(text, media));
-    if (yes(row[COL.MAX])) await run("Max", () => publishMax(text, media));
+    if (yes(row[COL.MAX])) {
+      if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
+      else await run("Max", () => publishMax(text, media ? [media] : []));
+    }
     if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, mediaUrl, threadsTarget));
 
     let status;
