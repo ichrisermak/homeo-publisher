@@ -19,7 +19,7 @@ const { google } = require("googleapis");
 const env = (k) => (process.env[k] || "").trim();
 
 const SPREADSHEET_ID = env("SPREADSHEET_ID");
-const SHEET_NAME = env("SHEET_NAME") || "10-11.2026";
+const SHEET_NAME = env("SHEET_NAME"); // необязательно: скрипт сам находит все листы-месяцы
 
 const TG_BOT_TOKEN = env("TG_BOT_TOKEN");
 const TG_CHANNEL_ID = env("TG_CHANNEL_ID");
@@ -329,89 +329,105 @@ async function publishInstagram(caption, links, target) {
 
 // ─── Основная логика ─────────────────────────────────────────────────────────
 
+/** Лист-месяц: название начинается с цифры («10-11.2026», «12.2026») и в A1 стоит «№» */
+const isMonthSheet = (title) => /^\d/.test(title);
+
+/** Убирает HTML-разметку Telegram для площадок, где она не поддерживается */
+const plain = (html) => String(html || "")
+  .replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "")
+  .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+
 async function main() {
   const auth = new google.auth.GoogleAuth({
     credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS),
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   const sheets = google.sheets({ version: "v4", auth });
-
-  const { data } = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A${FIRST_ROW}:L1000`,
-  });
-  const rows = data.values || [];
   const now = new Date();
 
   TOKENS = await loadTokens(sheets, SPREADSHEET_ID);
   await refreshThreadsTokens(sheets);
   await refreshIgTokens(sheets);
-  console.log(`[${now.toISOString()}] Лист "${SHEET_NAME}": ${rows.length} строк`);
-  // Куда публикуем (без раскрытия токенов) — для проверки настроек
+
+  // Все листы-месяцы таблицы — менять настройки в GitHub при смене месяца не нужно
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID, fields: "sheets.properties.title" });
+  const titles = meta.data.sheets.map((x) => x.properties.title).filter(isMonthSheet);
+  if (SHEET_NAME && !titles.includes(SHEET_NAME) && meta.data.sheets.some((x) => x.properties.title === SHEET_NAME)) titles.push(SHEET_NAME);
+
   const mask = (v) => (v ? `${v.slice(0, 5)}…${v.slice(-3)}` : "не задан");
+  console.log(`[${now.toISOString()}] Листы: ${titles.join(", ") || "нет"}`);
   console.log(`TG канал: ${mask(TG_CHANNEL_ID)} | Max канал: ${mask(MAX_CHANNEL_ID)} | VK: ${mask(VK_OWNER_ID)}`);
   console.log(`Threads: anna ${TOKENS.threads_anna ? TOKENS.threads_anna.note || "подключён" : "не подключён"}, prosto ${TOKENS.threads_prosto ? TOKENS.threads_prosto.note || "подключён" : "не подключён"}`);
   console.log(`Instagram: anna ${TOKENS.ig_anna ? TOKENS.ig_anna.note : "не подключён"}, prosto ${TOKENS.ig_prosto ? TOKENS.ig_prosto.note : "не подключён"}`);
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    const rowNum = i + FIRST_ROW;
-    const cell = (c) => String(row[c] || "").trim();
-
-    if (cell(COL.STATUS) !== "⏳") continue;
-
-    const publishAt = parseMoscowDateTime(cell(COL.DATE), cell(COL.TIME));
-    if (!publishAt) { await updateStatus(sheets, rowNum, "❌ дата дд.мм.гггг, время чч:мм"); continue; }
-    if (publishAt > now) continue;
-
-    const text = cell(COL.TEXT);
-    if (!text) { await updateStatus(sheets, rowNum, "❌ нет текста"); continue; }
-
-    // Сразу помечаем строку, чтобы параллельный запуск не опубликовал её второй раз
-    await updateStatus(sheets, rowNum, "🔄 публикуется");
-
-    const textThreads = cell(COL.TEXT_THREADS) || text;
-    const links = splitLinks(cell(COL.MEDIA));
-    const threadsTarget = cell(COL.THREADS).toLowerCase();
-    const igTarget = cell(COL.INSTA).toLowerCase();
-
-    const done = [];
-    const errors = [];
-    const run = async (name, fn) => {
-      try { await fn(); done.push(name); console.log(`[${name}] ✅ строка ${rowNum}`); }
-      catch (e) { errors.push(`${name}: ${shortErr(e)}`); console.log(`[${name}] ❌ строка ${rowNum}: ${shortErr(e)}`); }
-    };
-
-    // Скачиваем картинки один раз для TG / VK / Max (Threads и Instagram забирают их по ссылке сами)
-    const medias = [];
-    try {
-      for (const l of links) medias.push(await downloadMedia(toDirectUrl(l)));
-    } catch (e) { await updateStatus(sheets, rowNum, `❌ ${shortErr(e)}`); continue; }
-
-    if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, medias));
-    if (yes(row[COL.VK])) await run("VK", () => publishVK(text, medias));
-    if (yes(row[COL.MAX])) {
-      if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
-      else await run("Max", () => publishMax(text, medias));
-    }
-    // Threads: одна картинка (первая), карусели в Threads — позже
-    if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(textThreads, toPublicImageUrl(links[0]), threadsTarget));
-    if (igTarget && igTarget !== "нет") await run("Instagram", () => publishInstagram(text, links, igTarget));
-
-    let status;
-    if (!errors.length) status = "✅";
-    else if (done.length) status = `⚠️ ок: ${done.join(", ")} | ${errors.join("; ")}`;
-    else status = `❌ ${errors.join("; ")}`;
-    await updateStatus(sheets, rowNum, status);
+  for (const title of titles) {
+    const { data } = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${title}'!A1:L1000` });
+    const all = data.values || [];
+    if (String((all[0] || [])[0] || "").trim() !== "№") continue; // не наш формат
+    const rows = all.slice(FIRST_ROW - 1);
+    const due = rows.filter((r) => String(r[COL.STATUS] || "").trim() === "⏳").length;
+    console.log(`Лист "${title}": ${rows.filter((r) => r.some(Boolean)).length} строк, ждут публикации: ${due}`);
+    for (let i = 0; i < rows.length; i++) await processRow(sheets, title, rows[i], i + FIRST_ROW, now);
   }
-
   console.log("Готово.");
 }
 
-async function updateStatus(sheets, rowNum, status) {
+async function processRow(sheets, title, row, rowNum, now) {
+  const cell = (c) => String(row[c] || "").trim();
+  const setStatus = (s) => updateStatus(sheets, title, rowNum, s);
+
+  if (cell(COL.STATUS) !== "⏳") return;
+  const publishAt = parseMoscowDateTime(cell(COL.DATE), cell(COL.TIME));
+  if (!publishAt) { await setStatus("❌ дата дд.мм.гггг, время чч:мм"); return; }
+  if (publishAt > now) return;
+
+  const text = cell(COL.TEXT);
+  if (!text) { await setStatus("❌ нет текста"); return; }
+
+  // Сразу помечаем строку, чтобы параллельный запуск не опубликовал её второй раз
+  await setStatus("🔄 публикуется");
+
+  const hasHtml = /<\/?(b|i|u|s|a|code|pre)\b/i.test(text);
+  const textPlain = plain(text);
+  const shortText = plain(cell(COL.TEXT_THREADS)) || textPlain; // Threads и подпись Instagram — без разметки
+  const links = splitLinks(cell(COL.MEDIA));
+  const threadsTarget = cell(COL.THREADS).toLowerCase();
+  const igTarget = cell(COL.INSTA).toLowerCase();
+
+  const done = [];
+  const errors = [];
+  const run = async (name, fn) => {
+    try { await fn(); done.push(name); console.log(`[${name}] ✅ ${title}, строка ${rowNum}`); }
+    catch (e) { errors.push(`${name}: ${shortErr(e)}`); console.log(`[${name}] ❌ ${title}, строка ${rowNum}: ${shortErr(e)}`); }
+  };
+
+  // Скачиваем картинки один раз для TG / VK / Max (Threads и Instagram забирают их по ссылке сами)
+  const medias = [];
+  try {
+    for (const l of links) medias.push(await downloadMedia(toDirectUrl(l)));
+  } catch (e) { await setStatus(`❌ ${shortErr(e)}`); return; }
+
+  if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, medias));
+  if (yes(row[COL.VK])) await run("VK", () => publishVK(textPlain, medias));
+  if (yes(row[COL.MAX])) {
+    if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
+    else await run("Max", () => publishMax(textPlain, medias, hasHtml ? { html: text } : {}));
+  }
+  // Threads: одна картинка (первая), карусели в Threads — позже
+  if (threadsTarget && threadsTarget !== "нет") await run("Threads", () => publishThreads(shortText, toPublicImageUrl(links[0]), threadsTarget));
+  if (igTarget && igTarget !== "нет") await run("Instagram", () => publishInstagram(cell(COL.TEXT_THREADS) ? shortText : textPlain, links, igTarget));
+
+  let status;
+  if (!errors.length) status = "✅";
+  else if (done.length) status = `⚠️ ок: ${done.join(", ")} | ${errors.join("; ")}`;
+  else status = `❌ ${errors.join("; ")}`;
+  await setStatus(status);
+}
+
+async function updateStatus(sheets, title, rowNum, status) {
   await sheets.spreadsheets.values.update({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!L${rowNum}`,
+    range: `'${title}'!L${rowNum}`,
     valueInputOption: "RAW",
     requestBody: { values: [[status]] },
   });
