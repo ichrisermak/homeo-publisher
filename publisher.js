@@ -381,7 +381,7 @@ async function processRow(sheets, title, row, rowNum, now) {
   if (!publishAt) { await setStatus("❌ дата дд.мм.гггг, время чч:мм"); return; }
   if (publishAt > now) return;
 
-  const text = cell(COL.TEXT);
+  const text = linkifyFooter(cell(COL.TEXT));
   if (!text) { await setStatus("❌ нет текста"); return; }
 
   // Сразу помечаем строку, чтобы параллельный запуск не опубликовал её второй раз
@@ -437,3 +437,24 @@ main().catch((e) => {
   console.error("Критическая ошибка:", e.message);
   process.exit(1);
 });
+
+// Строка подписи «VK | TG | ДЗЕН | MAX» → ссылки (для TG и Max)
+const FOOTER_LINKS = {
+  VK: "https://vk.ru/homeopathy_prosto",
+  TG: "https://t.me/homeopathy_prosto",
+  "ДЗЕН": "https://dzen.ru/homeopathy_prosto",
+  MAX: "https://max.ru/channel_docStartsevaHomeopath",
+};
+function linkifyFooter(text) {
+  if (!text) return text;
+  const isHtml = /<\/?(b|i|u|s|a|code|pre)\b/i.test(text);
+  if (!isHtml && /[<&]/.test(text)) return text; // простой текст со спецсимволами не трогаем
+  return text.split("\n").map((line) => {
+    if (line.includes("<a ") || !line.includes("|")) return line;
+    const labels = Object.keys(FOOTER_LINKS).filter((lb) => new RegExp(`(^|[\\s|])${lb}(?=$|[\\s|])`).test(line));
+    if (labels.length < 2) return line;
+    let res = line;
+    for (const lb of labels) res = res.replace(new RegExp(`(^|[\\s|])(${lb})(?=$|[\\s|])`), `$1<a href="${FOOTER_LINKS[lb]}">$2</a>`);
+    return res;
+  }).join("\n");
+}
