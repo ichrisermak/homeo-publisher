@@ -1,0 +1,27 @@
+name: VK Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check VK token (ничего не публикует)
+        env:
+          VK_TOKEN: ${{ secrets.VK_TOKEN }}
+          VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
+        run: |
+          node <<'EOF'
+          const t = process.env.VK_TOKEN, g = String(process.env.VK_OWNER_ID || "").replace("-", "");
+          const call = async (m, p) => {
+            const b = new URLSearchParams({ ...p, access_token: t, v: "5.199" });
+            const r = await (await fetch("https://api.vk.com/method/" + m, { method: "POST", body: b })).json();
+            return r.error ? "❌ " + r.error.error_code + " " + r.error.error_msg : "✅ ok";
+          };
+          (async () => {
+            console.log("ключ задан:", !!t, "| сообщество:", g);
+            for (const [m, p] of [["groups.getById", { group_id: g }], ["photos.getWallUploadServer", { group_id: g }], ["docs.getWallUploadServer", { group_id: g }], ["stories.getPhotoUploadServer", { group_id: g, add_to_news: 1 }]])
+              console.log(m.padEnd(30), await call(m, p));
+          })();
+          EOF
