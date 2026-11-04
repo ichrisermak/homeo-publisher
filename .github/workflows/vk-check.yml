@@ -18,12 +18,15 @@ jobs:
             const b = new URLSearchParams({ ...p, access_token: t, v: "5.199" });
             return (await fetch("https://api.vk.com/method/" + m, { method: "POST", body: b })).json();
           };
-          const show = (m, r) => console.log(m.padEnd(36), r.error ? "❌ " + r.error.error_code + " " + r.error.error_msg : "✅ " + JSON.stringify(r.response).slice(0, 400));
           (async () => {
-            console.log("ключ задан:", !!t, "| сообщество:", g, "| канал:", ch);
-            show("groups.getById (канал)", await raw("groups.getById", { group_ids: ch, fields: "type,is_admin,admin_level,activity,description" }));
-            show("groups.getById (сообщество)", await raw("groups.getById", { group_ids: g, fields: "type" }));
-            show("messages.getConversationsById", await raw("messages.getConversationsById", { group_id: g, peer_ids: "-" + ch }));
-            show("wall.get канала (чтение)", await raw("wall.get", { owner_id: "-" + ch, count: 1 }));
+            const r = await raw("messages.getConversationsById", { group_id: g, peer_ids: "-" + ch, extended: 1 });
+            if (r.error) { console.log("❌", r.error.error_code, r.error.error_msg); return; }
+            const c = r.response.items[0] || {};
+            console.log("peer:", JSON.stringify(c.peer));
+            console.log("can_write:", JSON.stringify(c.can_write));
+            console.log("is_channel / тип:", JSON.stringify({ chat_settings: c.chat_settings ? Object.keys(c.chat_settings) : null, can_send_money: c.can_send_money, can_receive_money: c.can_receive_money }));
+            const keys = Object.keys(c).join(", "); console.log("поля:", keys);
+            const gr = (r.response.groups || []).map((x) => ({ id: x.id, name: x.name, type: x.type, is_admin: x.is_admin }));
+            console.log("groups:", JSON.stringify(gr));
           })();
           EOF
