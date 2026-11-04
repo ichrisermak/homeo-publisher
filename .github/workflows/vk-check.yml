@@ -13,26 +13,17 @@ jobs:
           VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
         run: |
           node <<'EOF'
-          const t = process.env.VK_TOKEN, g = String(process.env.VK_OWNER_ID || "").replace("-", "");
+          const t = process.env.VK_TOKEN, g = String(process.env.VK_OWNER_ID || "").replace("-", ""), ch = "235970731";
           const raw = async (m, p) => {
             const b = new URLSearchParams({ ...p, access_token: t, v: "5.199" });
             return (await fetch("https://api.vk.com/method/" + m, { method: "POST", body: b })).json();
           };
-          const call = async (m, p) => { const r = await raw(m, p); return r.error ? "❌ " + r.error.error_code + " " + r.error.error_msg : "✅ ok"; };
+          const show = (m, r) => console.log(m.padEnd(36), r.error ? "❌ " + r.error.error_code + " " + r.error.error_msg : "✅ " + JSON.stringify(r.response).slice(0, 400));
           (async () => {
-            console.log("ключ задан:", !!t, "| сообщество:", g);
-            for (const [m, p] of [["groups.getById", { group_id: g }], ["photos.getWallUploadServer", { group_id: g }], ["stories.getPhotoUploadServer", { group_id: g, add_to_news: 1 }], ["photos.getMessagesUploadServer", { peer_id: 0 }]])
-              console.log(m.padEnd(32), await call(m, p));
-            // Переписки сообщества: показываем только чаты и каналы (не личные диалоги)
-            const r = await raw("messages.getConversations", { group_id: g, count: 200, filter: "all" });
-            if (r.error) { console.log("messages.getConversations".padEnd(32), "❌ " + r.error.error_code + " " + r.error.error_msg); return; }
-            const items = (r.response.items || []).map((i) => i.conversation).filter((c) => c.peer.type !== "user");
-            console.log("переписок всего:", r.response.count, "| чатов/каналов:", items.length);
-            for (const c of items) {
-              const cs = c.chat_settings || {};
-              console.log("  peer", c.peer.id, "| тип:", c.peer.type, "| канал:", !!cs.is_group_channel, "| название:", cs.title || "", "| можно писать:", c.can_write ? c.can_write.allowed : "?");
-              const up = await raw("photos.getMessagesUploadServer", { peer_id: c.peer.id });
-              console.log("    фото в этот peer:", up.error ? "❌ " + up.error.error_msg : "✅ ok");
-            }
+            console.log("ключ задан:", !!t, "| сообщество:", g, "| канал:", ch);
+            show("groups.getById (канал)", await raw("groups.getById", { group_ids: ch, fields: "type,is_admin,admin_level,activity,description" }));
+            show("groups.getById (сообщество)", await raw("groups.getById", { group_ids: g, fields: "type" }));
+            show("messages.getConversationsById", await raw("messages.getConversationsById", { group_id: g, peer_ids: "-" + ch }));
+            show("wall.get канала (чтение)", await raw("wall.get", { owner_id: "-" + ch, count: 1 }));
           })();
           EOF
