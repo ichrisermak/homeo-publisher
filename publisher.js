@@ -44,7 +44,7 @@ const THREADS = {
 // ─── Колонки таблицы (0-based) ───────────────────────────────────────────────
 const COL = {
   NUM: 0, DATE: 1, TIME: 2, TEXT: 3, TEXT_THREADS: 4, MEDIA: 5,
-  TG: 6, VK: 7, MAX: 8, THREADS: 9, INSTA: 10, STATUS: 11,
+  TG: 6, VK: 7, MAX: 8, THREADS: 9, INSTA: 10, STATUS: 11, TEXT_VK: 12,
 };
 const FIRST_ROW = 4; // строки 1-3 — заголовки и пример
 
@@ -130,24 +130,27 @@ async function publishTelegram(text, medias) {
     }
   };
 
-  if (!medias.length) return sendText(text);
+  const info = (r) => { const m = Array.isArray(r) ? r[0] : r; return m && m.message_id ? { id: m.message_id, username: (m.chat && m.chat.username) || "" } : null; };
+  if (!medias.length) return info(await sendText(text));
 
   // Подпись к фото — максимум 1024 символа. Длинный текст отправляем вторым сообщением.
   const fits = text.length <= 1024;
+  let first = null;
   const form = new FormData();
   form.append("chat_id", TG_CHANNEL_ID);
   if (medias.length === 1) {
     form.append("photo", new Blob([medias[0].buf], { type: medias[0].type }), medias[0].filename);
     if (fits) form.append("caption", text);
-    await tgCall("sendPhoto", form);
+    first = await tgCall("sendPhoto", form);
   } else {
     // Альбом: до 10 фото, подпись у первого
     const group = medias.map((m, i) => ({ type: "photo", media: `attach://f${i}`, ...(i === 0 && fits && { caption: text }) }));
     medias.forEach((m, i) => form.append(`f${i}`, new Blob([m.buf], { type: m.type }), m.filename));
     form.append("media", JSON.stringify(group));
-    await tgCall("sendMediaGroup", form);
+    first = await tgCall("sendMediaGroup", form);
   }
   if (!fits) await sendText(text);
+  return info(first);
 }
 
 // ─── VK ──────────────────────────────────────────────────────────────────────
@@ -160,7 +163,7 @@ async function vkCall(method, params) {
   return data.response;
 }
 
-async function publishVK(text, medias) {
+async function publishVK(text, medias, link) {
   if (!VK_TOKEN || !VK_OWNER_ID) throw new Error("нет VK_TOKEN / VK_OWNER_ID");
   const groupId = String(VK_OWNER_ID).replace("-", "");
   const att = [];
@@ -184,9 +187,24 @@ async function publishVK(text, medias) {
   const attachments = att.join(",");
 
   await vkCall("wall.post", {
-    owner_id: `-${groupId}`, from_group: 1, message: text, ...(attachments && { attachments }),
+    owner_id: `-${groupId}`, from_group: 1, message: text, ...((link || attachments) && { attachments: link || attachments }),
   });
   return note || undefined;
+}
+
+/** Подпись «VK | TG | ДЗЕН | MAX» → строки с полными ссылками (в VK слово-ссылку не сделать) */
+function vkFooter(t) {
+  return String(t || "").split("\n").map((line) => {
+    const labels = Object.keys(FOOTER_LINKS).filter((lb) => new RegExp(`(^|[\\s|])${lb}(?=$|[\\s|])`).test(line));
+    if (labels.length < 2 || !line.includes("|")) return line;
+    return labels.filter((lb) => lb !== "VK").map((lb) => `${lb}: ${FOOTER_LINKS[lb]}`).join("\n");
+  }).join("\n");
+}
+/** Короткий пост-хук для стены VK: тизер + ссылки на TG-пост и MAX; превью TG-поста VK подтянет сам */
+function vkHook(hookText, fullPlain, tgLink) {
+  let t = String(hookText || "").trim();
+  if (!t) { const paras = fullPlain.split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean); t = ""; for (const p of paras) { if ((t + "\n\n" + p).length > 500) break; t = t ? t + "\n\n" + p : p; } if (!t) t = fullPlain.slice(0, 480).trim() + "…"; }
+  return `${t}\n\n👉 Читать полностью в Telegram: ${tgLink}\n👉 В MAX: ${FOOTER_LINKS.MAX}`;
 }
 
 // ─── Threads ─────────────────────────────────────────────────────────────────
@@ -368,7 +386,7 @@ async function main() {
   console.log(`Instagram: anna ${TOKENS.ig_anna ? TOKENS.ig_anna.note : "не подключён"}, prosto ${TOKENS.ig_prosto ? TOKENS.ig_prosto.note : "не подключён"}`);
 
   for (const title of titles) {
-    const { data } = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${title}'!A1:L1000` });
+    const { data } = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: `'${title}'!A1:M1000` });
     const all = data.values || [];
     if (String((all[0] || [])[0] || "").trim() !== "№") continue; // не наш формат
     const rows = all.slice(FIRST_ROW - 1);
@@ -414,8 +432,14 @@ async function processRow(sheets, title, row, rowNum, now) {
     for (const l of links) medias.push(await downloadMedia(toDirectUrl(l)));
   } catch (e) { await setStatus(`❌ ${shortErr(e)}`); return; }
 
-  if (yes(row[COL.TG])) await run("TG", () => publishTelegram(text, medias));
-  if (yes(row[COL.VK])) await run("VK", () => publishVK(textPlain, medias));
+  let tgPost = null;
+  if (yes(row[COL.TG])) await run("TG", async () => { tgPost = await publishTelegram(text, medias); });
+  const vkMode = /хук|hook/i.test(cell(COL.VK)) ? "hook" : yes(row[COL.VK]) ? "full" : "";
+  if (vkMode === "full") await run("VK", () => publishVK(vkFooter(textPlain), medias));
+  if (vkMode === "hook") {
+    const tgLink = tgPost && tgPost.username ? `https://t.me/${tgPost.username}/${tgPost.id}` : FOOTER_LINKS.TG;
+    await run("VK хук", async () => { await publishVK(vkHook(plain(cell(COL.TEXT_VK)) || plain(cell(COL.TEXT_THREADS)), textPlain, tgLink), [], tgLink); });
+  }
   if (yes(row[COL.MAX])) {
     if (MIRROR_ON && yes(row[COL.TG])) done.push("Max (через зеркало)");
     else await run("Max", () => publishMax(textPlain, medias, hasHtml ? { html: text } : {}));
