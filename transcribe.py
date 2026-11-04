@@ -41,6 +41,8 @@ COL_TR, COL_TR_STATUS = "Расшифровка", "Статус расшифро
 CHUNK = 45000          # в одну ячейку Google Таблиц помещается до 50 000 знаков
 TG_LIMIT_MB = 20       # Telegram отдаёт ботам файлы только до 20 МБ
 PODCAST = "Подкаст"
+# Какие типы материалов расшифровывать (через запятую)
+TYPES = {t.strip() for t in os.environ.get("TRANSCRIBE_TYPES", "Подкаст,Кружочек").split(",") if t.strip()}
 
 
 def log(*a):
@@ -187,13 +189,13 @@ def from_telegram(sh):
     for r in range(2, len(sh.rows) + 2):
         if time.time() - START > TIME_BUDGET:
             return
-        if sh.get(r, COL_TYPE) != PODCAST or not sh.get(r, COL_FILE):
+        if sh.get(r, COL_TYPE) not in TYPES or not sh.get(r, COL_FILE):
             continue
         st = sh.get(r, COL_TR_STATUS)
         if st and not st.startswith("🔁"):      # «🔁» в статусе = расшифровать заново
             continue
         num, title = sh.get(r, COL_NUM), sh.get(r, COL_TITLE)
-        log(f"Подкаст №{num}: {title}")
+        log(f"{sh.get(r, COL_TYPE)} №{num}: {title}")
         try:
             size = float((sh.get(r, COL_SIZE) or "0").replace(",", "."))
         except ValueError:
@@ -275,7 +277,7 @@ def check():
     """Быстрая проверка без загрузки модели: есть ли что расшифровывать."""
     c = creds()
     sh = Sheet(c)
-    need = any(sh.get(r, COL_TYPE) == PODCAST and sh.get(r, COL_FILE) and
+    need = any(sh.get(r, COL_TYPE) in TYPES and sh.get(r, COL_FILE) and
                (not sh.get(r, COL_TR_STATUS) or sh.get(r, COL_TR_STATUS).startswith("🔁"))
                for r in range(2, len(sh.rows) + 2)) or drive_pending(c)
     log("Есть подкасты для расшифровки" if need else "Новых подкастов нет")
