@@ -164,22 +164,29 @@ async function publishVK(text, medias) {
   if (!VK_TOKEN || !VK_OWNER_ID) throw new Error("нет VK_TOKEN / VK_OWNER_ID");
   const groupId = String(VK_OWNER_ID).replace("-", "");
   const att = [];
-  for (const media of medias) {
-    const server = await vkCall("photos.getWallUploadServer", { group_id: groupId });
-    const form = new FormData();
-    form.append("photo", new Blob([media.buf], { type: media.type }), media.filename);
-    const up = await (await fetch(server.upload_url, { method: "POST", body: form })).json();
-    if (!up.photo || up.photo === "[]") throw new Error("VK не принял картинку");
-    const saved = await vkCall("photos.saveWallPhoto", {
-      group_id: groupId, photo: up.photo, server: up.server, hash: up.hash,
-    });
-    att.push(`photo${saved[0].owner_id}_${saved[0].id}`);
+  let note = "";
+  try {
+    for (const media of medias) {
+      const server = await vkCall("photos.getWallUploadServer", { group_id: groupId });
+      const form = new FormData();
+      form.append("photo", new Blob([media.buf], { type: media.type }), media.filename);
+      const up = await (await fetch(server.upload_url, { method: "POST", body: form })).json();
+      if (!up.photo || up.photo === "[]") throw new Error("VK не принял картинку");
+      const saved = await vkCall("photos.saveWallPhoto", {
+        group_id: groupId, photo: up.photo, server: up.server, hash: up.hash,
+      });
+      att.push(`photo${saved[0].owner_id}_${saved[0].id}`);
+    }
+  } catch (e) {
+    // Ключ сообщества может не иметь права загружать фото на стену – тогда публикуем текст без картинки
+    att.length = 0; note = "без картинки: " + shortErr(e).slice(0, 80);
   }
   const attachments = att.join(",");
 
   await vkCall("wall.post", {
     owner_id: `-${groupId}`, from_group: 1, message: text, ...(attachments && { attachments }),
   });
+  return note || undefined;
 }
 
 // ─── Threads ─────────────────────────────────────────────────────────────────
@@ -397,7 +404,7 @@ async function processRow(sheets, title, row, rowNum, now) {
   const done = [];
   const errors = [];
   const run = async (name, fn) => {
-    try { await fn(); done.push(name); console.log(`[${name}] ✅ ${title}, строка ${rowNum}`); }
+    try { const r = await fn(); done.push(typeof r === "string" && r ? `${name} (${r})` : name); console.log(`[${name}] ✅ ${title}, строка ${rowNum}`); }
     catch (e) { errors.push(`${name}: ${shortErr(e)}`); console.log(`[${name}] ❌ ${title}, строка ${rowNum}: ${shortErr(e)}`); }
   };
 
@@ -418,7 +425,9 @@ async function processRow(sheets, title, row, rowNum, now) {
   if (igTarget && igTarget !== "нет") await run("Instagram", () => publishInstagram(cell(COL.TEXT_THREADS) ? shortText : textPlain, links, igTarget));
 
   let status;
-  if (!errors.length) status = "✅";
+  const warned = done.filter((d) => /\(без /.test(d));
+  if (!errors.length && !warned.length) status = "✅";
+  else if (!errors.length) status = `⚠️ ок: ${done.join(", ")}`;
   else if (done.length) status = `⚠️ ок: ${done.join(", ")} | ${errors.join("; ")}`;
   else status = `❌ ${errors.join("; ")}`;
   await setStatus(status);
