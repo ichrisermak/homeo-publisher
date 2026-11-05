@@ -1,20 +1,23 @@
 name: Connect account
 
-# Подключение аккаунта Threads или Instagram. Запуск вручную:
-# Actions → Connect account → Run workflow → площадка, аккаунт, адрес с кодом после «Разрешить»
+# Подключение Threads или Instagram. Actions → Connect account → Run workflow:
+# проект (id), площадка, аккаунт (ключ из ACCOUNTS проекта), адрес после «Разрешить».
 on:
   workflow_dispatch:
     inputs:
+      project:
+        description: "Проект (id из PROJECTS)"
+        required: true
+        type: string
       platform:
         description: "Площадка"
         required: true
         type: choice
         options: [threads, instagram]
       account:
-        description: "Аккаунт"
+        description: "Аккаунт (ключ из ACCOUNTS, например prosto)"
         required: true
-        type: choice
-        options: [prosto, anna]
+        type: string
       code:
         description: "Адресная строка после «Разрешить» (или код после code=)"
         required: true
@@ -22,23 +25,10 @@ on:
 
 jobs:
   connect:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm install --no-audit --no-fund
-      - name: Exchange code for token
-        env:
-          PLATFORM: ${{ inputs.platform }}
-          ACCOUNT: ${{ inputs.account }}
-          AUTH_CODE: ${{ inputs.code }}
-          THREADS_APP_ID: ${{ secrets.THREADS_APP_ID }}
-          THREADS_APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
-          IG_APP_ID: ${{ secrets.IG_APP_ID }}
-          IG_APP_SECRET: ${{ secrets.IG_APP_SECRET }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-        run: node connect.js
+    uses: ichrisermak/content-engine/.github/workflows/engine-connect.yml@main
+    with:
+      project: ${{ inputs.project }}
+      platform: ${{ inputs.platform }}
+      account: ${{ inputs.account }}
+      code: ${{ inputs.code }}
+    secrets: inherit
