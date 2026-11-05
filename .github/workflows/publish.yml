@@ -1,10 +1,10 @@
 name: Auto Publisher
 
-# Автопостинг по таблицам всех ваших проектов. Код – в общем движке, здесь только запуск.
-# Запуск каждые 5 минут даёт cron-job.org (см. README); расписание GitHub ниже – запасное.
+# Каждые 5 минут (запуск даёт cron-job.org, расписание ниже – запасное): бот материалов, зеркало TG → Max, публикации по таблицам, расшифровка подкастов.
+# Код – в закрытом движке YarkiLab, здесь только запуск. Настройки и ключи – в секретах репозитория.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       project:
@@ -12,13 +12,49 @@ on:
         required: false
         default: ""
 
-concurrency:
-  group: publisher
-  cancel-in-progress: false
-
 jobs:
-  publish:
-    uses: ichrisermak/content-engine/.github/workflows/engine-publish.yml@main
-    with:
-      project: ${{ inputs.project || '' }}
-    secrets: inherit
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: { group: publish, cancel-in-progress: false }
+    outputs:
+      need: ${{ steps.main.outputs.need }}
+    steps:
+      - name: Движок
+        uses: actions/checkout@v4
+        with:
+          repository: ichrisermak/yarkilab-content-engine
+          token: ${{ secrets.ENGINE_TOKEN || github.token }}
+          path: engine
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Запуск
+        id: main
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          ONLY_PROJECT: ${{ inputs.project }}
+        run: bash engine/ci/run.sh
+
+  transcribe:
+    needs: run
+    if: needs.run.outputs.need == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    concurrency: { group: transcribe, cancel-in-progress: false }
+    steps:
+      - name: Движок
+        uses: actions/checkout@v4
+        with:
+          repository: ichrisermak/yarkilab-content-engine
+          token: ${{ secrets.ENGINE_TOKEN || github.token }}
+          path: engine
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: actions/cache@v4
+        with: { path: ~/.cache/huggingface, key: whisper-medium }
+      - name: Расшифровка
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+        run: bash engine/ci/transcribe.sh
