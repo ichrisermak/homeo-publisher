@@ -1,62 +1,24 @@
 name: Auto Publisher
 
+# Автопостинг по таблицам всех ваших проектов. Код – в общем движке, здесь только запуск.
+# Запуск каждые 5 минут даёт cron-job.org (см. README); расписание GitHub ниже – запасное.
 on:
   schedule:
-    # Каждые 5 минут — минимальный интервал GitHub Actions
     - cron: "*/5 * * * *"
-  workflow_dispatch: # ручной запуск для теста
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Только один проект (id); пусто – все"
+        required: false
+        default: ""
 
-# Не запускать два прогона одновременно (иначе возможны дубли)
 concurrency:
   group: publisher
   cancel-in-progress: false
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-
-    env:
-      SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-      SHEET_NAME: ${{ secrets.SHEET_NAME }}
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-      TG_CHANNEL_ID: ${{ secrets.TG_CHANNEL_ID }}
-      TG_MIRROR_BOT_TOKEN: ${{ secrets.TG_MIRROR_BOT_TOKEN }}
-      VK_TOKEN: ${{ secrets.VK_TOKEN }}
-      VK_OWNER_ID: ${{ secrets.VK_OWNER_ID }}
-      MAX_TOKEN: ${{ secrets.MAX_TOKEN }}
-      MAX_CHANNEL_ID: ${{ secrets.MAX_CHANNEL_ID }}
-      THREADS_TOKEN_ANNA: ${{ secrets.THREADS_TOKEN_ANNA }}
-      THREADS_USER_ID_ANNA: ${{ secrets.THREADS_USER_ID_ANNA }}
-      THREADS_TOKEN_PROSTO: ${{ secrets.THREADS_TOKEN_PROSTO }}
-      THREADS_USER_ID_PROSTO: ${{ secrets.THREADS_USER_ID_PROSTO }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-
-      # Сертификат Минцифры — нужен для API Max (platform-api2.max.ru)
-      - name: Russian Trusted Root CA
-        continue-on-error: true
-        run: |
-          curl -fsSL --max-time 20 https://gu-st.ru/content/Other/doc/russian_trusted_root_ca.cer -o ru_ca.cer
-          openssl x509 -in ru_ca.cer -out ru_ca.pem 2>/dev/null || openssl x509 -inform DER -in ru_ca.cer -out ru_ca.pem
-          echo "NODE_EXTRA_CA_CERTS=$PWD/ru_ca.pem" >> "$GITHUB_ENV"
-
-      # Посты из Telegram → Max
-      - name: Mirror TG to Max
-        continue-on-error: true
-        run: node mirror.js
-
-      # Публикации по таблице
-      - name: Run publisher
-        run: node publisher.js
+    uses: ichrisermak/content-engine/.github/workflows/engine-publish.yml@main
+    with:
+      project: ${{ inputs.project || '' }}
+    secrets: inherit
