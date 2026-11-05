@@ -1,34 +1,30 @@
-name: Connect account
+name: YarkiLab – подключить аккаунт
 
-# Подключение Threads или Instagram. Actions → Connect account → Run workflow:
-# проект (id), площадка, аккаунт (ключ из ACCOUNTS проекта), адрес после «Разрешить».
+# Threads или Instagram: Actions → «Подключить аккаунт» → Run workflow.
 on:
   workflow_dispatch:
     inputs:
-      project:
-        description: "Проект (id из PROJECTS)"
-        required: true
-        type: string
-      platform:
-        description: "Площадка"
-        required: true
-        type: choice
-        options: [threads, instagram]
-      account:
-        description: "Аккаунт (ключ из ACCOUNTS, например prosto)"
-        required: true
-        type: string
-      code:
-        description: "Адресная строка после «Разрешить» (или код после code=)"
-        required: true
-        type: string
+      project: { description: "Проект (id из PROJECTS)", required: true, type: string }
+      platform: { description: "Площадка", required: true, type: choice, options: [threads, instagram] }
+      account: { description: "Аккаунт (ключ из ACCOUNTS)", required: true, type: string }
+      code: { description: "Адресная строка после «Разрешить» (или код после code=)", required: true, type: string }
 
 jobs:
   connect:
-    uses: ichrisermak/content-engine/.github/workflows/engine-connect.yml@main
-    with:
-      project: ${{ inputs.project }}
-      platform: ${{ inputs.platform }}
-      account: ${{ inputs.account }}
-      code: ${{ inputs.code }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ichrisermak/yarkilab-content-engine
+          token: ${{ secrets.ENGINE_TOKEN || github.token }}
+          path: engine
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          ONLY_PROJECT: ${{ inputs.project }}
+          PLATFORM: ${{ inputs.platform }}
+          ACCOUNT: ${{ inputs.account }}
+          AUTH_CODE: ${{ inputs.code }}
+        run: bash engine/ci/connect.sh
