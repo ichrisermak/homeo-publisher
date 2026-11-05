@@ -1,59 +1,16 @@
 name: Podcast Transcriber
 
+# Расшифровка подкастов и кружочков из таблиц материалов всех проектов.
 on:
   schedule:
-    # Проверка новых подкастов каждые 30 минут (GitHub может запускать с опозданием)
     - cron: "17,47 * * * *"
-  workflow_dispatch: # ручной запуск
+  workflow_dispatch:
 
-# Не запускать две расшифровки одновременно
 concurrency:
   group: transcriber
   cancel-in-progress: false
 
 jobs:
   transcribe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
-
-    env:
-      GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-      TG_MATERIALS_BOT_TOKEN: ${{ secrets.TG_MATERIALS_BOT_TOKEN }}
-      MATERIALS_SPREADSHEET_ID: ${{ vars.MATERIALS_SPREADSHEET_ID || '1vn7ZtiSiakXcfFooKzU1RQQFOxcAlfBDrGxvsNEDu1A' }}
-      MATERIALS_SHEET: ${{ vars.MATERIALS_SHEET || 'Наличие материалов' }}
-      DRIVE_FOLDER_ID: ${{ vars.PODCAST_FOLDER_ID }}
-      WHISPER_MODEL: ${{ vars.WHISPER_MODEL || 'medium' }}
-      WHISPER_LANG: ru
-      # Подсказка модели: термины проекта, чтобы они распознавались правильно
-      WHISPER_PROMPT: ${{ vars.WHISPER_PROMPT || 'Подкаст врача-гомеопата Анны Старцевой «Гомеопатия просто». Классическая гомеопатия, гомеопатический препарат, потенция 30С, 200С, Арника, Нукс вомика, Пульсатилла, Аконит, Белладонна, Календула, анамнез, конституция, миазмы.' }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install base packages
-        run: pip install --quiet gspread google-auth requests
-
-      - name: Check for new podcasts
-        id: check
-        run: python transcribe.py --check
-
-      - name: Cache Whisper model
-        if: steps.check.outputs.need == '1'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: whisper-${{ env.WHISPER_MODEL }}
-
-      - name: Install Whisper
-        if: steps.check.outputs.need == '1'
-        run: pip install --quiet faster-whisper
-
-      - name: Transcribe
-        if: steps.check.outputs.need == '1'
-        run: python transcribe.py
+    uses: ichrisermak/content-engine/.github/workflows/engine-transcribe.yml@main
+    secrets: inherit
