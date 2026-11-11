@@ -1,0 +1,47 @@
+name: Дозаполнить полный текст материалов
+
+# Ручной разовый запуск: пересылает старые посты канала-базы в служебный чат, берёт текст и пишет в «Полный текст».
+on:
+  workflow_dispatch:
+    inputs:
+      msg_ids:
+        description: "msg_id через запятую или all"
+        required: true
+        default: "338"
+      chat_id:
+        description: "Служебный чат (НЕ канал-база): ваш Telegram id после /start боту или id закрытого канала"
+        required: true
+      project:
+        description: "id проекта из секрета PROJECTS"
+        required: true
+        default: "homeo"
+      dry_run:
+        description: "Пробный запуск без записи в таблицу"
+        type: boolean
+        default: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency: { group: publish, cancel-in-progress: false }
+    steps:
+      - name: Движок
+        uses: actions/checkout@v4
+        with:
+          repository: ichrisermak/yarkilab-content-engine
+          token: ${{ secrets.ENGINE_TOKEN || github.token }}
+          path: engine
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Дозаполнение
+        working-directory: engine
+        env:
+          ALL_SECRETS: ${{ toJSON(secrets) }}
+          ONLY_PROJECT: ${{ inputs.project }}
+          BACKFILL_MSG_IDS: ${{ inputs.msg_ids }}
+          BACKFILL_CHAT_ID: ${{ inputs.chat_id }}
+          BACKFILL_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          npm install --no-audit --no-fund --silent >/dev/null 2>&1 || npm install --no-audit --no-fund
+          node run.js materials-backfill.js
